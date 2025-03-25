@@ -462,7 +462,7 @@ class MemMapStructure(object):
 
         data = page.buf()
         if page_id == Page.ID_INFORMATION:
-            if not all(data):
+            if len(set(data)) <= 1:
                 print(self.__class__.__name__, 'Invalid data', page_id, data)
                 return
 

@@ -4,7 +4,15 @@ from bus.device.devinfo import Page, MemMapStructure as Mm, ObjectT6 as T6, Obje
 import time
 import array
 import queue
+import serial
+import serial.tools.list_ports
 import csv
+import os
+import sys
+import argparse
+from bus.updi_bus import Updi_Device as Updi
+from bus.pyupdi.device.device import Device
+
 
 class AppError(Exception):
     "App error exception class type"
@@ -44,13 +52,13 @@ class MxtStruct(Mm):
         # wait data back
         try:
             msg = MxtStruct.data_queue.get(timeout=MxtStruct.TIMEOUT_MSG)
-            result = dev.decode_message(cmd, msg)
+            result = self.dev.decode_message(cmd, msg)
             return result
         except Exception as e:
             print("Receive timeout: ", e, cmd)
 
     def ping(self):
-        result = self.send_and_receive(dev.enpack_poll_command(MxtStruct.MSG_HID_SIMULATED, self.seq()))
+        result = self.send_and_receive(self.dev.enpack_poll_command(MxtStruct.MSG_HID_SIMULATED, self.seq()))
         if result:
             return result.value()
 
@@ -87,7 +95,7 @@ class MxtStruct(Mm):
         size = page.size()
 
         while (size):
-            result = self.send_and_receive(dev.enpack_block_read_command(MxtStruct.MSG_HID_SIMULATED, self.seq(), {'addr': addr, 'size': size }))
+            result = self.send_and_receive(self.dev.enpack_block_read_command(MxtStruct.MSG_HID_SIMULATED, self.seq(), {'addr': addr, 'size': size }))
             if result and result.value():
                 data = result.value()
                 self.save_page_data(page_id, addr, size, data)
@@ -111,7 +119,7 @@ class MxtStruct(Mm):
         off = 0
 
         while (off < size):
-            result = self.send_and_receive(dev.enpack_block_write_command(MxtStruct.MSG_HID_SIMULATED, self.seq(), {'addr': addr + off, 'value': data[off:]}))
+            result = self.send_and_receive(self.dev.enpack_block_write_command(MxtStruct.MSG_HID_SIMULATED, self.seq(), {'addr': addr + off, 'value': data[off:]}))
             if result and result.value():
                 curr_size = result.value()
                 off += curr_size
@@ -268,121 +276,251 @@ class MxtStruct(Mm):
                 return switch_case(obj, diag)
 
 
-if __name__ == '__main__':
-    # Hid Bus
-    bus = Hid_Bus()
+class HidApp(object):
 
-    phy = None
-    while not phy:
-        phy = bus.refresh()
-        if not phy:
-            print("Please connect bridge board")
-            time.sleep(2)
+    def run(self, mode):
+        # Hid Bus
+        bus = Hid_Bus()
 
-    if phy:
-        # creat Hid device
-        dev = bus.create_new_device(phy)
+        phy = None
+        while not phy:
+            phy = bus.refresh()
+            if not phy:
+                print("Please connect bridge board")
+                time.sleep(2)
 
-        # create queue for message recieving
-        data_queue = queue.Queue()
-
-        # set receiving callback
-        phy.set_raw_data_handler(MxtStruct.on_data_received)
-
-        mxt = MxtStruct(dev)
-        if not mxt.ping():
-            print("Mxt Device is not conneced")
-            # time.sleep(2)
-        else:
-            if not mxt.read_info_block():
-                raise AppError("Mxt Information table is not readable")
-            else:
-                
-                # Get ID Information
-                page = mxt.get_page(Page.ID_INFORMATION)
-                id_info = page.get_info()
-                if not id_info:
-                    raise AppError("Mxt ID information table is found")
-                
-                # Get Object table
-                page = mxt.get_page(Page.OBJECT_TABLE)
-                obj_table = page.get_info()
-                if not obj_table:
-                    raise AppError("Mxt Object table is found")
-
-                # T7 exit low power mode
-                page_id = (Mm.MXT_GEN_POWER_T7, 0)
-                page = mxt.page_read(page_id)
-                actv2idleto = 0
-                result = mxt.object_write(page_id, "actv2idleto", actv2idleto)
-                if not result:
-                    print("T7 exit IDLE mode failed")
-
-                # T15 Gain
-                info_t15 = obj_table[Mm.MXT_TOUCH_KEYARRAY_T15]
-                inst = info_t15.instances_minus_one + 1
-
-                total_channel = 0
-                for i in range(inst):
-                    page_id = (Mm.MXT_TOUCH_KEYARRAY_T15, i)
-                    total_channel += mxt.object_read(page_id, "ysize")
-
-                # T8 sensing mode
-                measallow_list = {
-                    "MU": T8.MXT_T8_MEASALLOW_MUTUALTCH,
-                    "SCT": T8.MXT_T8_MEASALLOW_SELFTCH,
-                    "SCP": T8.MXT_T8_MEASALLOW_SELFPROX
-                }
-
-                output = []
-                for name, measallow in measallow_list.items():
-                    page_id = (Mm.MXT_GEN_ACQUIRE_T8, 0)
-                    page = mxt.page_read(page_id)
-                    result = mxt.object_write(page_id, "measallow", measallow)
-                    if not result:
-                        raise AppError(f"T8 set measure mode {measallow} failed")
-
-                    for dig in range(4):
-                        for ana in range(4):
-                            # all instance
-                            for i in range(inst):
-                                page_id = (Mm.MXT_TOUCH_KEYARRAY_T15, i)
-                                page = mxt.page_read(page_id)
-                                blen = ((ana << 4) | dig)
-                                mxt.object_write(page_id, "blen", blen)
-
-                            data = mxt.diagnostic(T6.MXT_DIAGNOSTIC_KEY_DELTA)
-                            if data:
-                                arr = [name, "delta", f"ana_{pow(2, ana)}", f"dig_{pow(2, dig)}"]
-                                arr.extend(data[:total_channel])
-                                output.append(arr)
-                                print(arr)
-
-                            data = mxt.diagnostic(T6.MXT_DIAGNOSTIC_KEY_REF)
-                            if data:
-                                arr = [name, "ref", f"ana_{pow(2, ana)}", f"dig_{pow(2, dig)}"]
-                                arr.extend(data[:total_channel])
-                                output.append(arr)
-                                print(arr)
-
-                            data = mxt.diagnostic(T6.MXT_DIAGNOSTIC_KEY_SIGNAL)
-                            if data:
-                                arr = [name, "cc", f"ana_{pow(2, ana)}", f"dig_{pow(2, dig)}"]
-                                arr.extend(data[:total_channel])
-                                output.append(arr)
-                                print(arr)
-
-                # 指定要写入的 CSV 文件名
-                filename = "output.csv"
-
-                # 打开文件并创建一个 csv.writer 对象
-                with open(filename, mode='w', newline='', encoding='utf-8') as file:
-                    writer = csv.writer(file)
-
-                    # 写入数据
-                    for row in output:
-                        writer.writerow(row)
         
-        phy.close()
+        output = []
+        if phy:
+            # creat Hid device
+            dev = bus.create_new_device(phy)
+
+            # create queue for message recieving
+            data_queue = queue.Queue()
+
+            # set receiving callback
+            phy.set_raw_data_handler(MxtStruct.on_data_received)
+
+            mxt = MxtStruct(dev)
+            if not mxt.ping():
+                print("Mxt Device is not conneced")
+                # time.sleep(2)
+            else:
+                if not mxt.read_info_block():
+                    raise AppError("Mxt Information table is not readable")
+                else:
+                    
+                    # Get ID Information
+                    page = mxt.get_page(Page.ID_INFORMATION)
+                    id_info = page.get_info()
+                    if not id_info:
+                        raise AppError("Mxt ID information table is found")
+                    
+                    # Get Object table
+                    page = mxt.get_page(Page.OBJECT_TABLE)
+                    obj_table = page.get_info()
+                    if not obj_table:
+                        raise AppError("Mxt Object table is found")
+
+                    # T7 exit low power mode
+                    page_id = (Mm.MXT_GEN_POWER_T7, 0)
+                    page = mxt.page_read(page_id)
+                    actv2idleto = 0
+                    result = mxt.object_write(page_id, "actv2idleto", actv2idleto)
+                    if not result:
+                        print("T7 exit IDLE mode failed")
+
+                    # T15 Gain
+                    info_t15 = obj_table[Mm.MXT_TOUCH_KEYARRAY_T15]
+                    inst = info_t15.instances_minus_one + 1
+
+                    total_channel = 0
+                    for i in range(inst):
+                        page_id = (Mm.MXT_TOUCH_KEYARRAY_T15, i)
+                        total_channel += mxt.object_read(page_id, "ysize")
+
+                    # T8 sensing mode
+                    measallow_list = {
+                        "MU": T8.MXT_T8_MEASALLOW_MUTUALTCH,
+                        "SCT": T8.MXT_T8_MEASALLOW_SELFTCH,
+                        "SCP": T8.MXT_T8_MEASALLOW_SELFPROX
+                    }
+
+                    title = ['sensing', 'type', 'anagain', 'diggain', 'range_lo','range_hi']
+                    title.extend([f'key{i}' for i in range(total_channel)])
+                    print(title)
+                    output.append(title)
+
+                    for name, measallow in measallow_list.items():
+                        if not (measallow & mode):
+                            continue
+
+                        page_id = (Mm.MXT_GEN_ACQUIRE_T8, 0)
+                        page = mxt.page_read(page_id)
+                        result = mxt.object_write(page_id, "measallow", measallow)
+                        if not result:
+                            raise AppError(f"T8 set measure mode {measallow} failed")
+
+                        gain_range = (GAIN_1, GAIN_2, GAIN_4, GAIN_8) = range(4)
+                        for dig in gain_range:
+                            for ana in gain_range:
+                                # all instance
+                                for i in range(inst):
+                                    page_id = (Mm.MXT_TOUCH_KEYARRAY_T15, i)
+                                    page = mxt.page_read(page_id)
+                                    blen = ((ana << 4) | dig)
+                                    mxt.object_write(page_id, "blen", blen)
+
+                                anagain = pow(2, ana)
+                                diggain = pow(2, dig)
+
+                                data = mxt.diagnostic(T6.MXT_DIAGNOSTIC_KEY_DELTA)
+                                if data:
+                                    arr = [name, "delta", anagain, diggain, None, None]
+                                    arr.extend(data[:total_channel])
+                                    output.append(arr)
+                                    print(arr)
+
+                                data = mxt.diagnostic(T6.MXT_DIAGNOSTIC_KEY_REF)
+                                if data:
+                                    base = 512 * diggain
+                                    deviation = 10 * anagain * diggain
+                                    arr = [name, "ref", anagain, diggain, base - deviation, base + deviation]
+                                    arr.extend(data[:total_channel])
+                                    output.append(arr)
+                                    print(arr)
+
+                                data = mxt.diagnostic(T6.MXT_DIAGNOSTIC_KEY_SIGNAL)
+                                if data:
+                                    arr = [name, "cc", anagain, diggain, None, None]
+                                    arr.extend(data[:total_channel])
+                                    output.append(arr)
+                                    print(arr)
+
+            phy.close()
+
+            return output
+
+
+class UpdiApp(object):
+    
+    SER_HID = "VID:PID=03EB:6123"
+    RESET_SLEEP = 0.2
+
+    def run(self):
+        port = None
+        while not port:
+            ports = list(serial.tools.list_ports.grep(UpdiApp.SER_HID))
+            if (len(ports)):
+                port = ports[0]
+            else:
+                print("Waiting for UPDI Board connected")
+                time.sleep(2)
+
+        comport = port.device
+        dev = Updi(comport, 115200, Device("attiny3217"))
+        dev.start(True)
+        info = dev.device_info()
+        print(info)
+        dev.stop()
+
+        time.sleep(UpdiApp.RESET_SLEEP)
+
+        return info
+
+
+class Writer(object):
+
+    def __init__(self, filename = "output.csv"):
+        # 指定要写入的 CSV 文件名
+        self.filename = filename
+
+    def run(self, info, data):
+        # 打开文件并创建一个 csv.writer 对象
+        with open(self.filename, mode='w', newline='', encoding='utf-8') as file:
+            writer = csv.writer(file)
+
+            print("Write chip infomation")
+            for name, value in info.items():
+                if isinstance(value, list) and all(isinstance(x, int) for x in value):
+                    value = ",".join(f"{v:02X}" for v in value)
+
+                file.write(f"{name}:, {value}\n")  
+            
+            # 写入数据
+            print("Write data")
+            for row in data:
+                writer.writerow(row)
+
+        print(f"Write to file: {self.filename}")
+
+
+# cmd = ["-f", r"out\Kx#72_2.csv", "--mode", "1"]
+cmd = None
+if __name__ == '__main__':
+    def parse_args(args=None):
+
+        parser = argparse.ArgumentParser(
+            prog='xparse',
+            formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+            description='Tools for log Graphic debugview data and UPDI information')
+
+        parser.add_argument('--version',
+                            action='version', version='%(prog)s v1.0.1',
+                            help='show version')
+
+        parser.add_argument('-f', '--filename', 
+                            required=False,
+                            nargs='?',
+                            default='output.csv',
+                            metavar='LOG_FILE',
+                            help='where the the data will be stored')
+
+        parser.add_argument('--mode', 
+                            required=False,
+                            nargs='?',
+                            default="15",
+                            const='.',
+                            metavar='sc|mu|key',
+                            help='the sensing mode of data: sc/mc/key')
+        return parser
+
+
+    def runstat(args=None):
+        parser = parse_args(args)
+        aargs = args if args is not None else sys.argv[1:]
+        args = parser.parse_args(aargs)
+        print(args)
+
+        if not args.filename and not args.scan:
+            parser.print_help()
+            return
+
+        if os.path.exists(args.filename):
+            print(f"output file existed {args.filename}")
+            return
+        
+        return args
+
+    args = runstat(cmd)
+    if not args:
+        raise AppError("args invalid")
+
+    # Read Sernum
+    app = UpdiApp()
+    info = app.run()
+
+    # sampling mode
+    try:
+        mode = int(args.mode)
+    except:
+        mode = T8.MXT_T8_MEASALLOW_MUTUALTCH | T8.MXT_T8_MEASALLOW_SELFTCH | T8.MXT_T8_MEASALLOW_SELFPROX
+
+    app = HidApp()
+    data = app.run(mode)
+
+    # save csv
+    app = Writer(args.filename)
+    app.run(info, data)
 
    
