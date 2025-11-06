@@ -455,7 +455,7 @@ class Writer(object):
         print(f"Write to file: {self.filename}")
 
 
-# cmd = ["-f", r"out\Kx#72_2.csv", "--mode", "1"]
+cmd = ["-f", r"out\641TD.csv", "--mode", "1"]
 cmd = None
 if __name__ == '__main__':
     def parse_args(args=None):
@@ -476,13 +476,17 @@ if __name__ == '__main__':
                             metavar='LOG_FILE',
                             help='where the the data will be stored')
 
-        parser.add_argument('--mode', 
+        parser.add_argument('--mode',
                             required=False,
-                            nargs='?',
-                            default="15",
-                            const='.',
-                            metavar='sc|mu|key',
-                            help='the sensing mode of data: sc/mc/key')
+                            # choices=[0, 1, 2],  # 明确可选值
+                            type=int,
+                            default=15,          # 默认值改为明确选项
+                            metavar='MODE_ID',
+                            help='Sensing mode: '
+                                'bit 0=Mutal, '
+                                'bit 1=Self, '
+                                'bit 2=Hover, '
+                                'bit 3=Proxy (default: %(default)s)')
         return parser
 
 
@@ -498,7 +502,7 @@ if __name__ == '__main__':
 
         if os.path.exists(args.filename):
             print(f"output file existed {args.filename}")
-            return
+            #return
         
         return args
 
@@ -506,21 +510,8 @@ if __name__ == '__main__':
     if not args:
         raise AppError("args invalid")
 
-    # Read Sernum
-    app = UpdiApp()
-    info = app.run()
-
-    # sampling mode
-    try:
-        mode = int(args.mode)
-    except:
-        mode = T8.MXT_T8_MEASALLOW_MUTUALTCH | T8.MXT_T8_MEASALLOW_SELFTCH | T8.MXT_T8_MEASALLOW_SELFPROX
-
     app = HidApp()
-    data = app.run(mode)
+    data = app.run(args.mode)
 
-    # save csv
-    app = Writer(args.filename)
-    app.run(info, data)
 
    
