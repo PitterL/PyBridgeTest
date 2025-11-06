@@ -70,6 +70,13 @@ class BaseMessage(object):
         if 'value' in info.keys():
             return info['value']
 
+    def size(self):
+        value = self.value()
+        if value:
+            return len(value)
+        else:
+            return 0
+
     def get_pdata(self, name):
         return self._pdata.get('name')
 

@@ -177,7 +177,7 @@ class Page(object):
     #
     # compond_id is made of OBJECT_ID and INSTANCE_ID
     #
-    def __init__(self, compound_id, offset, length, info=None):
+    def __init__(self, compound_id, offset, length, rid):
         if isinstance(compound_id, (list, tuple)):
             major, minor = compound_id
         else:
@@ -188,9 +188,10 @@ class Page(object):
         self.minor = minor
         self.offset = offset  # page data offset in mem map
         self.length = length  # page data len
+        self.rid = rid # report id
         # self.cache = array.array('B', [])   #use to store data in split reading
         self.__buffer = array.array('B', [])  # copy from cache data if split reading complete
-        self.info = info
+        self._info = None
 
         #print(self.__class__.__name__, self.__str__())
 
@@ -230,6 +231,9 @@ class Page(object):
 
     def size(self):
         return self.length
+
+    def get_report_id(self):
+        return self.rid
 
     def clear_buffer(self):
         # self.set_info(None)
@@ -285,17 +289,17 @@ class Page(object):
         return self.__buffer
 
     def set_info(self, info):
-        self.info = info
+        self._info = info
 
     def get_info(self):
-        return self.info
+        return self._info
 
     def data_writeback(self):
         if not isinstance(self.major, int):
             raise MemError(f"{self.major} not support write back")
         
-        if self.info:
-            data = array.array('B', ctypes.string_at(ctypes.addressof(self.info), ctypes.sizeof(self.info)))
+        if self._info:
+            data = array.array('B', ctypes.string_at(ctypes.addressof(self._info), ctypes.sizeof(self._info)))
             self.save_to_buffer(0, data)
         else:
             print(f"Page id {self.id()} no data writeback")
@@ -364,6 +368,7 @@ class MemMapStructure(object):
     MXT_SPT_DIGITIZER_T43 = 43
     MXT_SPT_MESSAGECOUNT_T44 = 44
     MXT_SPT_CTECONFIG_T46 = 46
+    MXT_SPT_TIMER_T61 = 61
     MXT_SPT_DYNAMICCONFIGURATIONCONTAINER_T71 = 71
     MXT_PROCI_SYMBOLGESTUREPROCESSOR = 92
     MXT_PROCI_TOUCHSEQUENCELOGGER = 93
@@ -379,7 +384,7 @@ class MemMapStructure(object):
 
     def __init__(self):
         self.__pages = {} #buffer to store each object instance
-        self.__pages[Page.ID_INFORMATION] = Page(Page.ID_INFORMATION, 0, len(IdInformation._fields_))
+        self.__pages[Page.ID_INFORMATION] = Page(Page.ID_INFORMATION, 0, len(IdInformation._fields_), 0)
 
     def __str__(self):
         result = []
@@ -394,14 +399,14 @@ class MemMapStructure(object):
         if key in self.__pages.keys():
             return self.__pages[key]
 
-    def create_page(self, page_id, offset, length):
+    def create_page(self, page_id, offset, length, rid):
         if length <= 0:
             print(self.__class__.__name__, "create_page size zero", page_id)
             return
 
         if page_id in self.__pages.keys():
             del self.__pages[page_id]
-        self.__pages[page_id] = Page(page_id, offset, length)
+        self.__pages[page_id] = Page(page_id, offset, length, rid)
         return self.get_page(page_id)
 
     def delete_page(self, page_id):
@@ -473,7 +478,7 @@ class MemMapStructure(object):
             page.set_info(id_infomation)
             offset = page.addr() + page.size()
             length = id_infomation.object_num * ctypes.sizeof(ObjectTableElement)
-            self.create_page(Page.OBJECT_TABLE, offset, length)
+            self.create_page(Page.OBJECT_TABLE, offset, length, 0)
         elif page_id == Page.OBJECT_TABLE:
             page_list = {'id':self.get_page(Page.ID_INFORMATION),
                         'obj':self.get_page(Page.OBJECT_TABLE)}
@@ -484,6 +489,7 @@ class MemMapStructure(object):
 
             esize = ctypes.sizeof(ObjectTableElement)
             object_tables = {}
+            reportid = 1
             print(self.__class__.__name__, "Parse Object Table:")
             for n in range(page_list['id'].get_info().object_num):
                 #print(self.__class__.__name__, data[n * esize: (n + 1) * esize])
@@ -494,11 +500,12 @@ class MemMapStructure(object):
                 for i in range(inst):
                     elem_page_id = (element.type, i)
                     elem_size = element.size_minus_one + 1
-                    self.create_page(elem_page_id, offset, elem_size)
+                    self.create_page(elem_page_id, offset, elem_size, reportid if element.num_report_ids else 0)
                     offset += elem_size
+                    reportid += element.num_report_ids
                 
                 object_tables[element.type] = element
-
+                
             page_list['obj'].set_info(object_tables)
 
             if not self.check_info_crc(page_list):

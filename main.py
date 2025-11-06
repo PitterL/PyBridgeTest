@@ -10,6 +10,7 @@ import csv
 import os
 import sys
 import argparse
+import msvcrt  # Windows 专用
 from bus.updi_bus import Updi_Device as Updi
 from bus.pyupdi.device.device import Device
 
@@ -46,19 +47,39 @@ class MxtStruct(Mm):
         self._seqnum = seq + 1
         return [seq]
 
-    def send_and_receive(self, cmd):
-        cmd.send()
+    def send_and_receive(self, cmd, timeout=TIMEOUT_MSG):
+        # send command
+        if cmd:
+            cmd.send()
 
         # wait data back
         try:
-            msg = MxtStruct.data_queue.get(timeout=MxtStruct.TIMEOUT_MSG)
-            result = self.dev.decode_message(cmd, msg)
-            return result
+            msg = MxtStruct.data_queue.get(timeout)
+            if cmd:
+                return self.dev.decode_message(cmd, msg)
+            else:
+                return msg
         except Exception as e:
             print("Receive timeout: ", e, cmd)
 
-    def ping(self):
-        result = self.send_and_receive(self.dev.enpack_poll_command(MxtStruct.MSG_HID_SIMULATED, self.seq()))
+    def message_receive(self, timeout=TIMEOUT_MSG):
+        try:
+            # wait data back
+            msg = MxtStruct.data_queue.get(timeout)
+            value = self.dev.decode_auto_repeat_message(msg)
+            msg.set_extra_info(value=value)
+
+            return msg
+        except Exception as e:
+            print("Receive timeout: ", e, cmd)
+
+    def set_bridge_config(self):
+        result = self.send_and_receive(self.dev.enpack_config_command(MxtStruct.MSG_HID_SIMULATED, self.seq()))
+        if result:
+            return result.value()
+
+    def set_auto_repeat_enable(self, addr, size):
+        result = self.send_and_receive(self.dev.enpack_repeat_enable_command(MxtStruct.MSG_HID_SIMULATED, self.seq(), {"addr":addr, "size": size}))
         if result:
             return result.value()
 
@@ -278,7 +299,45 @@ class MxtStruct(Mm):
 
 class HidApp(object):
 
-    def run(self, mode):
+    time_last = 0 
+    tick = 0
+
+    def mxt_proc_t16_message(self, msg):
+        MXT_T61_STATUS_RUNNING = 1 << 0    # BIT(0) = 1
+        MXT_T61_STATUS_FORCERPT = 1 << 4   # BIT(4) = 16
+        MXT_T61_STATUS_STOP = 1 << 5       # BIT(5) = 32
+        MXT_T61_STATUS_START = 1 << 6      # BIT(6) = 64
+        MXT_T61_STATUS_ELAPSED = 1 << 7    # BIT(7) = 128
+
+        timestamp = msg.time()
+        interval = timestamp - self.time_last
+        if not self.time_last:
+            local_time = time.localtime(timestamp)
+            formatted_time = time.strftime("%Y-%m-%d %H:%M:%S", local_time)
+            result = f"Test starting time: {formatted_time}"
+        else:
+            data = msg.value()
+            status = data[0]
+            parts = [
+                f"{self.tick} T61 Status {status:02X} Interval {interval:.3f}",
+                " RUNNING" if status & MXT_T61_STATUS_RUNNING else "",
+                " FORCE" if status & MXT_T61_STATUS_FORCERPT else "",
+                " STOP" if status & MXT_T61_STATUS_STOP else "",
+                " START" if status & MXT_T61_STATUS_START else "",
+                " ELAPSED" if status & MXT_T61_STATUS_ELAPSED else "",
+                " Timeout" if interval < 5.5 or interval > 6.5 else ""
+            ]
+
+            result = "".join(parts)
+
+        print(result)
+
+        self.time_last = timestamp
+        self.tick = self.tick + 1
+
+        return result
+
+    def run(self, file):
         # Hid Bus
         bus = Hid_Bus()
 
@@ -302,7 +361,7 @@ class HidApp(object):
             phy.set_raw_data_handler(MxtStruct.on_data_received)
 
             mxt = MxtStruct(dev)
-            if not mxt.ping():
+            if not mxt.set_bridge_config():
                 print("Mxt Device is not conneced")
                 # time.sleep(2)
             else:
@@ -322,81 +381,46 @@ class HidApp(object):
                     if not obj_table:
                         raise AppError("Mxt Object table is found")
 
-                    # T7 exit low power mode
-                    page_id = (Mm.MXT_GEN_POWER_T7, 0)
-                    page = mxt.page_read(page_id)
-                    actv2idleto = 0
-                    result = mxt.object_write(page_id, "actv2idleto", actv2idleto)
-                    if not result:
-                        print("T7 exit IDLE mode failed")
+                    # T5 message
+                    obj_info = obj_table[Mm.MXT_GEN_MESSAGE_T5]
+                    addr = obj_info.start_address
+                    size = obj_info.size_minus_one + 1
 
-                    # T15 Gain
-                    info_t15 = obj_table[Mm.MXT_TOUCH_KEYARRAY_T15]
-                    inst = info_t15.instances_minus_one + 1
+                    # enable message report
+                    mxt.set_auto_repeat_enable(addr, size)
 
-                    total_channel = 0
-                    for i in range(inst):
-                        page_id = (Mm.MXT_TOUCH_KEYARRAY_T15, i)
-                        total_channel += mxt.object_read(page_id, "ysize")
+                    # T61
+                    page_id = (Mm.MXT_SPT_TIMER_T61, 0)
+                    t16_page = mxt.get_page(page_id)
+                    print("T61[0] report id is ", t16_page.get_report_id())
 
-                    # T8 sensing mode
-                    measallow_list = {
-                        "MU": T8.MXT_T8_MEASALLOW_MUTUALTCH,
-                        "SCT": T8.MXT_T8_MEASALLOW_SELFTCH,
-                        "SCP": T8.MXT_T8_MEASALLOW_SELFPROX
-                    }
+                    # output.append(arr)
+                    # print(arr)
+                    
 
-                    title = ['sensing', 'type', 'anagain', 'diggain', 'range_lo','range_hi']
-                    title.extend([f'key{i}' for i in range(total_channel)])
-                    print(title)
-                    output.append(title)
-
-                    for name, measallow in measallow_list.items():
-                        if not (measallow & mode):
-                            continue
-
-                        page_id = (Mm.MXT_GEN_ACQUIRE_T8, 0)
-                        page = mxt.page_read(page_id)
-                        result = mxt.object_write(page_id, "measallow", measallow)
-                        if not result:
-                            raise AppError(f"T8 set measure mode {measallow} failed")
-
-                        gain_range = (GAIN_1, GAIN_2, GAIN_4, GAIN_8) = range(4)
-                        for dig in gain_range:
-                            for ana in gain_range:
-                                # all instance
-                                for i in range(inst):
-                                    page_id = (Mm.MXT_TOUCH_KEYARRAY_T15, i)
-                                    page = mxt.page_read(page_id)
-                                    blen = ((ana << 4) | dig)
-                                    mxt.object_write(page_id, "blen", blen)
-
-                                anagain = pow(2, ana)
-                                diggain = pow(2, dig)
-
-                                data = mxt.diagnostic(T6.MXT_DIAGNOSTIC_KEY_DELTA)
-                                if data:
-                                    arr = [name, "delta", anagain, diggain, None, None]
-                                    arr.extend(data[:total_channel])
-                                    output.append(arr)
-                                    print(arr)
-
-                                data = mxt.diagnostic(T6.MXT_DIAGNOSTIC_KEY_REF)
-                                if data:
-                                    base = 512 * diggain
-                                    deviation = 10 * anagain * diggain
-                                    arr = [name, "ref", anagain, diggain, base - deviation, base + deviation]
-                                    arr.extend(data[:total_channel])
-                                    output.append(arr)
-                                    print(arr)
-
-                                data = mxt.diagnostic(T6.MXT_DIAGNOSTIC_KEY_SIGNAL)
-                                if data:
-                                    arr = [name, "cc", anagain, diggain, None, None]
-                                    arr.extend(data[:total_channel])
-                                    output.append(arr)
-                                    print(arr)
-
+                    print("Press 's' to exit...")
+                    while True:
+                        if msvcrt.kbhit():  # 检查是否有按键
+                            key = msvcrt.getch().decode('utf-8').lower()  # 获取按键并转换为小写
+                            if key == 's':
+                                print("Detected 's' button, exiting")
+                                break
+                        
+                        timeout = 10
+                        line = None
+                        msg = mxt.message_receive(timeout)
+                        if msg and msg.size():
+                            data = msg.value()
+                            if data[0] == t16_page.get_report_id():
+                                line = self.mxt_proc_t16_message(msg)
+                        else:
+                            line = f"timeout {timeout} at {time.time()}"
+                        
+                        if line:
+                            file.write(line + "\n")
+                            file.flush()
+                            output.append(line)
+        
             phy.close()
 
             return output
@@ -455,7 +479,7 @@ class Writer(object):
         print(f"Write to file: {self.filename}")
 
 
-cmd = ["-f", r"out\641TD.csv", "--mode", "1"]
+#cmd = ["-f", r"out\message.csv"]
 cmd = None
 if __name__ == '__main__':
     def parse_args(args=None):
@@ -472,21 +496,10 @@ if __name__ == '__main__':
         parser.add_argument('-f', '--filename', 
                             required=False,
                             nargs='?',
-                            default='output.csv',
+                            default='output.txt',
                             metavar='LOG_FILE',
                             help='where the the data will be stored')
 
-        parser.add_argument('--mode',
-                            required=False,
-                            # choices=[0, 1, 2],  # 明确可选值
-                            type=int,
-                            default=15,          # 默认值改为明确选项
-                            metavar='MODE_ID',
-                            help='Sensing mode: '
-                                'bit 0=Mutal, '
-                                'bit 1=Self, '
-                                'bit 2=Hover, '
-                                'bit 3=Proxy (default: %(default)s)')
         return parser
 
 
@@ -500,8 +513,8 @@ if __name__ == '__main__':
             parser.print_help()
             return
 
-        if os.path.exists(args.filename):
-            print(f"output file existed {args.filename}")
+        #if os.path.exists(args.filename):
+        #    print(f"output file existed {args.filename}")
             #return
         
         return args
@@ -510,8 +523,24 @@ if __name__ == '__main__':
     if not args:
         raise AppError("args invalid")
 
-    app = HidApp()
-    data = app.run(args.mode)
+    local_time = time.localtime(time.time())
+    formatted_time = time.strftime("%Y%m%d_%H%M%S", local_time)
+    
+    if args.filename.endswith('.txt'):
+        filename = args.filename.replace('.txt', f'_{formatted_time}.txt')
+    else:
+        filename = f"{args.filename}_{formatted_time}.txt"
+
+    with open(filename, mode='w', newline='', encoding='utf-8') as file:
+        app = HidApp()
+        data = app.run(file)
+
+        local_time = time.localtime(time.time())
+        formatted_time = time.strftime("%Y-%m-%d %H:%M:%S", local_time)
+    
+        file.write(f"finished at {formatted_time}" + "\n")
+        file.flush()
+
 
 
    

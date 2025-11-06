@@ -40,7 +40,7 @@ class HidCommand(Message):
     TAG     TAG2    TAG3
     0x4     0       0
     """
-    (CMD_TEST, CMD_IRQ, CMD_WRITE_READ, CMD_RAW) = (0x80, (0x88, 0x58), 0x51,  None)
+    (CMD_CONFIG, CMD_REPEAT, CMD_WRITE_READ, CMD_RAW, CMD_AUTO) = (0x80, (0x88, 0x58), 0x51,  "Raw", "Auto")
 
     TIMEOUT = 1 #second
     SIZE_MAX = {'r': 63, 'w': 59}
@@ -64,9 +64,9 @@ class HidCommand(Message):
         super(HidCommand, self).__init__(HidCommand.NAME, type, 0, seq, **kwargs)
 
         value = []
-        if type == HidCommand.CMD_TEST:
+        if type == HidCommand.CMD_CONFIG:
             #[type, 0, value]
-            value = array.array('B', [type, 0, kwargs['value']])
+            value = array.array('B', [type, 0x30, kwargs['value']])
             self.trans_size = 0
             self.op = 'w'
         elif type == HidCommand.CMD_WRITE_READ:
@@ -89,7 +89,7 @@ class HidCommand(Message):
             value = kwargs['value']
             self.trans_size = self.to_trans_size(len(value), 'w')
             self.op = 'w'
-        elif type == HidCommand.CMD_IRQ:
+        elif type == HidCommand.CMD_REPEAT:
             addr_l, addr_h = kwargs['addr'].to_bytes(2, byteorder='little')
             value = type + (2, kwargs['size'], addr_l, addr_h)
             self.trans_size = self.to_trans_size(len(value), 'w')
@@ -244,7 +244,7 @@ class Hid_Device(object):
         value = msg.value()
         return HidMessage(type, self.id(), seq, value=value)
 
-    def decode_ouput_message(self, cmd, msg):
+    def decode_repeat_ack_message(self, cmd, msg):
         cmd_data = cmd.raw_data()
         type = cmd.parent_type()
         seq = cmd.seq()  # to parent seq
@@ -259,36 +259,34 @@ class Hid_Device(object):
             result = False
 
 
-    def decode_interrupt_message(self, msg):
+    def decode_auto_repeat_message(self, msg):
         (RW_OK, NAK_W, NAK_ADDR, W_ONLY_OK) = range(4)
         value = msg.value()
         if value[0] == 0x9A and value[1] == RW_OK:
-            pass
+            return value[2:]
         else:
             print(self.__class__.__name__, "Invalid irq message:", value)
 
     def decode_message(self, cmd, msg):
 
-        if cmd.type() == HidCommand.CMD_TEST:
+        if cmd.type() == HidCommand.CMD_CONFIG:
             result = self.decode_test_message(cmd, msg)
         elif cmd.type() == HidCommand.CMD_WRITE_READ:
             result = self.decode_rw_message(cmd, msg)
         elif cmd.type() == HidCommand.CMD_RAW:
             result = self.decode_raw_message(cmd, msg)
-        elif cmd.type() == HidCommand.CMD_IRQ:
-            result = self.decode_ouput_message(cmd, msg)
-        else:
-            result = self.decode_interrupt_message(msg)
+        elif cmd.type() == HidCommand.CMD_REPEAT:
+            result = self.decode_repeat_ack_message(cmd, msg)
 
         if not result:
             print(self.__class__.__name__, "Unhandled cmd message", cmd, msg)
 
         return result
 
-    def enpack_poll_command(self, type, seq, extra_info = {}):
-        "Test command 1"
+    def enpack_config_command(self, type, seq, extra_info = {}):
+        "config bridge parameter"
 
-        return HidCommand(HidCommand.CMD_TEST, self.next_seq(seq),
+        return HidCommand(HidCommand.CMD_CONFIG, self.next_seq(seq),
                          value=0xca, parent_type=type, **extra_info,
                          pipe=self.report_out)
 
@@ -311,8 +309,8 @@ class Hid_Device(object):
                          pipe=self.report_out)
         
 
-    def enpack_msg_output_command(self, type, seq, data):
-        return HidCommand(HidCommand.CMD_IRQ, self.next_seq(seq),
+    def enpack_repeat_enable_command(self, type, seq, data):
+        return HidCommand(HidCommand.CMD_REPEAT, self.next_seq(seq),
                          addr=data['addr'], size=data['size'], parent_type=type,
                          pipe=self.report_out)
     
