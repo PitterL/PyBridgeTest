@@ -1,4 +1,4 @@
-from bus.hid_bus import Hid_Bus
+from bus.hid_bus import Hid_Bus, Hid_Device
 from bus.message import Message
 from bus.device.devinfo import Page, MemMapStructure as Mm, ObjectT6 as T6, ObjectT7 as T7, ObjectT8 as T8, OBJECT_T37 as T37
 import time
@@ -11,9 +11,6 @@ import os
 import sys
 import argparse
 import msvcrt  # Windows 专用
-from bus.updi_bus import Updi_Device as Updi
-from bus.pyupdi.device.device import Device
-
 
 class AppError(Exception):
     "App error exception class type"
@@ -30,7 +27,7 @@ class MxtStruct(Mm):
 
     data_queue = queue.Queue()
 
-    def __init__(self, dev):
+    def __init__(self, dev: Hid_Device):
         self.dev = dev
         self._seqnum = 0
         super(MxtStruct, self).__init__()
@@ -54,22 +51,30 @@ class MxtStruct(Mm):
 
         # wait data back
         try:
-            msg = MxtStruct.data_queue.get(timeout)
-            if cmd:
-                return self.dev.decode_message(cmd, msg)
-            else:
-                return msg
+            while True:
+                msg = MxtStruct.data_queue.get(timeout)
+                if cmd:
+                    result = self.dev.decode_message(cmd, msg)
+                    if not result:
+                        print("Drop unexpected message: ", msg)
+                    else:
+                        return result
+                else:
+                    return msg
         except Exception as e:
             print("Receive timeout: ", e, cmd)
 
     def message_receive(self, timeout=TIMEOUT_MSG):
         try:
             # wait data back
-            msg = MxtStruct.data_queue.get(timeout)
-            value = self.dev.decode_auto_repeat_message(msg)
-            msg.set_extra_info(value=value)
-
-            return msg
+            while True:
+                msg = MxtStruct.data_queue.get(timeout)
+                result = self.dev.decode_auto_repeat_message(msg)
+                if not result:
+                    print("Not auto repeat message: ", msg)
+                else:
+                    msg.set_extra_info(value=result)
+                    return msg
         except Exception as e:
             print("Receive timeout: ", e, cmd)
 
@@ -424,33 +429,6 @@ class HidApp(object):
             phy.close()
 
             return output
-
-
-class UpdiApp(object):
-    
-    SER_HID = "VID:PID=03EB:6123"
-    RESET_SLEEP = 0.2
-
-    def run(self):
-        port = None
-        while not port:
-            ports = list(serial.tools.list_ports.grep(UpdiApp.SER_HID))
-            if (len(ports)):
-                port = ports[0]
-            else:
-                print("Waiting for UPDI Board connected")
-                time.sleep(2)
-
-        comport = port.device
-        dev = Updi(comport, 115200, Device("attiny3217"))
-        dev.start(True)
-        info = dev.device_info()
-        print(info)
-        dev.stop()
-
-        time.sleep(UpdiApp.RESET_SLEEP)
-
-        return info
 
 
 class Writer(object):

@@ -254,10 +254,7 @@ class Hid_Device(object):
 
         value = msg.value()
         if cmd_data[0] == value[0] and value[1] == OK:
-            result = True
-        else:
-            result = False
-
+            return HidMessage(type, self.id(), seq, value=True)
 
     def decode_auto_repeat_message(self, msg):
         (RW_OK, NAK_W, NAK_ADDR, W_ONLY_OK) = range(4)
