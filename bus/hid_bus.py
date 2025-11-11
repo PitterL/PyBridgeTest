@@ -314,7 +314,7 @@ class Hid_Device(object):
 
 class Hid_Bus(object):
 
-    VID_PID_LIST = [(0x03eb, 0x6123)]  #vid/pid
+    VID_PID_LIST = [(0x03eb, 0x6123), (0x03eb, 0x2118)]  #vid/pid
     USAGE_IDS = [
         (usbhid.get_full_usage_id(0xff00, 0x02), usbhid.get_full_usage_id(0xff00, 0x03)),
         (usbhid.get_full_usage_id(0xffff, 0x02), usbhid.get_full_usage_id(0xffff, 0x04))
