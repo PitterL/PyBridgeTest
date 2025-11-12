@@ -396,8 +396,8 @@ class HidApp(object):
 
                     # T61
                     page_id = (Mm.MXT_SPT_TIMER_T61, 0)
-                    t16_page = mxt.get_page(page_id)
-                    print("T61[0] report id is ", t16_page.get_report_id())
+                    t61_page = mxt.get_page(page_id)
+                    print("T61[0] report id is ", t61_page.get_report_id())
 
                     # output.append(arr)
                     # print(arr)
@@ -416,7 +416,7 @@ class HidApp(object):
                         msg = mxt.message_receive(timeout)
                         if msg and msg.size():
                             data = msg.value()
-                            if data[0] == t16_page.get_report_id():
+                            if data[0] == t61_page.get_report_id():
                                 line = self.mxt_proc_t16_message(msg)
                         else:
                             line = f"timeout {timeout} at {time.time()}"
